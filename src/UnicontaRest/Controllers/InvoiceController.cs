@@ -1,5 +1,6 @@
 ﻿using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 using System;
 using System.Linq;
 using System.Threading.Tasks;
@@ -15,9 +16,16 @@ namespace UnicontaRest.Controllers
     [ApiController]
     public class InvoiceController : UnicontaControllerBase
     {
+        private readonly ILogger<InvoiceController> _logger;
+
+        public InvoiceController(ILogger<InvoiceController> logger)
+        {
+            _logger = logger;
+        }
+
         [HttpPost("Orders/{orderNumber:int}")] // Legacy
         [HttpPost("DebtorOrders/{orderNumber:int}")]
-        public async Task<ActionResult<InvoicePostingResult>> CreateDebtorInvoice(int orderNumber, bool simulate = false, CompanyLayoutType documentType = CompanyLayoutType.Invoice)
+        public async Task<ActionResult<InvoicePostingResult>> CreateDebtorInvoice(int orderNumber, bool simulate = false, CompanyLayoutType documentType = CompanyLayoutType.Invoice, [FromQuery] string[] email = null)
         {
             var crudApi = new CrudAPI(Session, Company);
             var invoiceApi = new InvoiceAPI(Session, Company);
@@ -31,19 +39,33 @@ namespace UnicontaRest.Controllers
             }
 
             var orderLines = await crudApi.Query<DebtorOrderLineClient>(order);
+            var emails = string.Join(';', email ?? Array.Empty<string>());
 
-            Task<InvoicePostingResult> invoiceTask;
-
-            if (RequestsPdf())
+            var sendEmail = !string.IsNullOrEmpty(emails);
+            if (sendEmail)
             {
-                invoiceTask = invoiceApi.PostInvoicePDF(order, orderLines, DateTime.Now, InvoiceNumber: 0 /* Autogenerate */, simulate, documentType);
+                _logger.LogInformation("Sending email to: {Emails}", emails);
             }
             else
             {
-                invoiceTask = invoiceApi.PostInvoice(order, orderLines, DateTime.Now, InvoiceNumber: 0 /* Autogenerate */, simulate);
+                _logger.LogInformation("No email address specified, skipping...");
             }
 
-            var invoice = await invoiceTask;
+            var invoice = await invoiceApi.PostInvoice(
+                order, orderLines, DateTime.Now,
+                InvoiceNumber: 0 /* Autogenerate */,
+                Simulate: simulate,
+                InvoiceType: null,
+                InvTransType: null,
+                SendEmail: sendEmail,
+                ShowInvoice: false,
+                DocumentType: documentType,
+                Emails: emails,
+                OnlyToThisEmail: false,
+                GLTransType: null,
+                Documents: null,
+                PostOnlyDelivered: false,
+                ReturnPDF: RequestsPdf());
 
             if (invoice.Err != ErrorCodes.Succes)
             {
@@ -59,7 +81,7 @@ namespace UnicontaRest.Controllers
         }
 
         [HttpPost("CreditorOrders/{orderNumber:int}")]
-        public async Task<ActionResult<InvoicePostingResult>> CreateInvoice(int orderNumber, bool simulate = false, CompanyLayoutType documentType = CompanyLayoutType.Invoice)
+        public async Task<ActionResult<InvoicePostingResult>> CreateInvoice(int orderNumber, bool simulate = false, CompanyLayoutType documentType = CompanyLayoutType.Invoice, [FromQuery] string[] email = null)
         {
             var crudApi = new CrudAPI(Session, Company);
             var invoiceApi = new InvoiceAPI(Session, Company);
@@ -73,32 +95,33 @@ namespace UnicontaRest.Controllers
             }
 
             var orderLines = await crudApi.Query<CreditorOrderLineClient>(order);
+            var emails = string.Join(';', email ?? Array.Empty<string>());
 
-            Task<InvoicePostingResult> invoiceTask;
-
-            if (RequestsPdf())
+            var sendEmail = !string.IsNullOrEmpty(emails);
+            if (sendEmail)
             {
-                invoiceTask = invoiceApi.PostInvoicePDF(order, orderLines, DateTime.Now, InvoiceNumber: 0 /* Autogenerate */, simulate, documentType);
+                _logger.LogInformation("Sending email to: {Emails}", emails);
             }
             else
             {
-                invoiceTask = invoiceApi.PostInvoice(
-                    order, orderLines, DateTime.Now,
-                    InvoiceNumber: 0 /* Autogenerate */,
-                    Simulate: simulate,
-                    InvoiceType: null,
-                    InvTransType: null,
-                    SendEmail: false,
-                    ShowInvoice: true,
-                    DocumentType: documentType,
-                    Emails: null,
-                    OnlyToThisEmail: false,
-                    GLTransType: null,
-                    Documents: null,
-                    PostOnlyDelivered: false);
+                _logger.LogInformation("No email address specified, skipping...");
             }
 
-            var invoice = await invoiceTask;
+            var invoice = await invoiceApi.PostInvoice(
+                order, orderLines, DateTime.Now,
+                InvoiceNumber: 0 /* Autogenerate */,
+                Simulate: simulate,
+                InvoiceType: null,
+                InvTransType: null,
+                SendEmail: sendEmail,
+                ShowInvoice: true,
+                DocumentType: documentType,
+                Emails: emails,
+                OnlyToThisEmail: false,
+                GLTransType: null,
+                Documents: null,
+                PostOnlyDelivered: false,
+                ReturnPDF: RequestsPdf());
 
             if (invoice.Err != ErrorCodes.Succes)
             {

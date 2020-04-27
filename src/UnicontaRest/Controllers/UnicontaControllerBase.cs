@@ -1,17 +1,13 @@
 ﻿using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Logging;
 using System;
 using System.Linq;
 using System.Reflection;
-using System.Threading;
 using System.Threading.Tasks;
 using Uniconta.API.Service;
-using Uniconta.Common;
-using Uniconta.Common.User;
 using Uniconta.DataModel;
 
 namespace UnicontaRest.Controllers
@@ -33,8 +29,35 @@ namespace UnicontaRest.Controllers
                 return;
             }
 
-            if (!await EnsureInitialized(context.HttpContext, credentials))
+            var logger = context.HttpContext.RequestServices.GetRequiredService<ILogger<UnicontaControllerBase>>();
+            var connectionProvider = context.HttpContext.RequestServices.GetRequiredService<UnicontaConnectionProvider>();
+
+            try
             {
+                var details = await connectionProvider.GetConnectionAsync(credentials, HttpContext.RequestAborted);
+
+                Session = details.Session;
+                Companies = details.Companies;
+            }
+            catch (Exception e)
+            {
+                logger.LogWarning(e, "Unable to get uniconta connection for provided credentials");
+
+                context.Result = Forbid();
+                return;
+            }
+
+            if (Session is null || Companies is null)
+            {
+                logger.LogCritical("The uniconta connection is invalid {Session}, {Companies}", Session, Companies);
+                context.Result = StatusCode(StatusCodes.Status502BadGateway);
+                return;
+            }
+
+            if (!Session.LoggedIn)
+            {
+                logger.LogCritical("The session is not logged in");
+                context.Result = StatusCode(StatusCodes.Status502BadGateway);
                 return;
             }
 
@@ -42,7 +65,12 @@ namespace UnicontaRest.Controllers
 
             if (routeValues.TryGetValue<string>("typeName", out var typeName))
             {
-                Type = _unicontaAssembly.GetType($"Uniconta.DataModel.{typeName}", throwOnError: false, ignoreCase: true);
+                Type = _unicontaAssembly.GetType($"Uniconta.ClientTools.DataModel.{typeName}Client", throwOnError: false, ignoreCase: true);
+
+                if (Type is null)
+                {
+                    Type = _unicontaAssembly.GetType($"Uniconta.DataModel.{typeName}", throwOnError: false, ignoreCase: true);
+                }
 
                 if (Type is null)
                 {
@@ -55,6 +83,13 @@ namespace UnicontaRest.Controllers
             {
                 Company = Companies.FirstOrDefault(x => x.CompanyId == companyId);
 
+                if (Company.GetType().GetField("Fields", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(Company) is null)
+                {
+                    // Make sure that the "Fields" field is loaded for the company
+                    // This is neede to make user defined fields work
+                    await Session.GetCompany(companyId, Company);
+                }
+
                 if (Company is null)
                 {
                     context.Result = NotFound();
@@ -63,83 +98,6 @@ namespace UnicontaRest.Controllers
             }
 
             await next();
-        }
-
-        private async Task<bool> EnsureInitialized(HttpContext httpContext, Credentials credentials)
-        {
-            var cache = httpContext.RequestServices.GetRequiredService<IMemoryCache>();
-
-            var item = cache.GetOrCreate(credentials, entry =>
-            {
-                entry.SetSlidingExpiration(TimeSpan.FromMinutes(10));
-                return new SessionCacheItem();
-            });
-
-            if (item.IsInitialized)
-            {
-                Session = item.Session;
-                Companies = item.Companies;
-                return true;
-            }
-
-            if (item.WaitingForInitializationLockCount > 20)
-            {
-                httpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
-                return false;
-            }
-
-            Interlocked.Increment(ref item.WaitingForInitializationLockCount);
-
-            await item.InitializationLock.WaitAsync();
-
-            Interlocked.Decrement(ref item.WaitingForInitializationLockCount);
-
-            try
-            {
-                if (item.IsInitialized)
-                {
-                    Session = item.Session;
-                    Companies = item.Companies;
-                    return true;
-                }
-
-                var options = httpContext.RequestServices.GetRequiredService<IOptions<UnicontaRestOptions>>().Value;
-                var connection = new UnicontaConnection(APITarget.Live);
-                Session = new Session(connection);
-
-                var loggedIn = await Session.LoginAsync(credentials.Username, credentials.Password, LoginType.API, options.AffiliateKey);
-
-                if (loggedIn != ErrorCodes.Succes)
-                {
-                    httpContext.Response.StatusCode = StatusCodes.Status403Forbidden;
-                    return false;
-                }
-
-                Companies = await Session.GetCompanies();
-
-                item.SetValues(Session, Companies);
-
-                return true;
-            }
-            finally
-            {
-                item.InitializationLock.Release();
-            }
-        }
-
-        private class SessionCacheItem
-        {
-            public Session Session { get; private set; }
-            public Company[] Companies { get; private set; }
-            public int WaitingForInitializationLockCount;
-            public SemaphoreSlim InitializationLock { get; } = new SemaphoreSlim(1);
-            public bool IsInitialized => Session is object && Companies is object;
-
-            public void SetValues(Session session, Company[] companies)
-            {
-                Session = session;
-                Companies = companies;
-            }
         }
     }
 }

@@ -16,6 +16,11 @@ namespace UnicontaRest.Controllers
         {
             var predicates = filter.Select(x => PropValuePairEx.GenereteWhereElements(Type, x.Key, x.Value)).ToList();
 
+            if (predicates.Any(x => x is null))
+            {
+                return BadRequest("Invalid filter");
+            }
+
             if (predicates.Any(x => x.OrList.Count > 40))
             {
                 return BadRequest("The maximum number of OR's in a filter is 40");
